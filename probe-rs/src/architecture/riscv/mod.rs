@@ -490,7 +490,19 @@ impl<X: XlenMode> CoreInterface for RiscvCore<'_, X> {
 
         if status.allhalted() {
             // determine reason for halt
-            let dcsr = Dcsr(self.interface.read_csr(0x7b0)? as u32);
+            // NOTE: Some cores (observed on T-Head E902 after halting via
+            // ebreak) reject abstract-command CSR reads with a cmderr
+            // exception. The halt state is still valid, so fall back to an
+            // unknown reason instead of failing the whole status read.
+            let dcsr = match self.interface.read_csr(0x7b0) {
+                Ok(raw) => Dcsr(raw as u32),
+                Err(error) => {
+                    tracing::debug!(
+                        "Reading dcsr failed ({error}), reporting halted with unknown reason"
+                    );
+                    return Ok(CoreStatus::Halted(HaltReason::Unknown));
+                }
+            };
 
             let reason = match dcsr.cause() {
                 // An ebreak instruction was hit
@@ -498,7 +510,18 @@ impl<X: XlenMode> CoreInterface for RiscvCore<'_, X> {
                     // The chip initiated this halt, therefore we need to
                     // update pc_written state
                     self.state.pc_written = false;
-                    if let Some(cmd) = self.check_for_semihosting()? {
+                    // The semihosting check reads memory at PC-4, which can be
+                    // unmapped (e.g. PC at the very start of RAM). Treat a
+                    // failed check as "no semihosting command" instead of
+                    // failing the whole status read.
+                    let semihosting = match self.check_for_semihosting() {
+                        Ok(cmd) => cmd,
+                        Err(error) => {
+                            tracing::debug!("Semihosting check failed ({error}), assuming none");
+                            None
+                        }
+                    };
+                    if let Some(cmd) = semihosting {
                         HaltReason::Breakpoint(BreakpointCause::Semihosting(cmd))
                     } else {
                         HaltReason::Breakpoint(BreakpointCause::Software)

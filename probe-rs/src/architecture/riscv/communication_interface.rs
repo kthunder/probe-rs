@@ -1434,6 +1434,17 @@ impl<'state> RiscvCommunicationInterface<'state> {
                 );
                 self.read_csr_progbuf(address)
             }
+            // Workaround for cores that reject abstract GPR reads with
+            // cmderr=Exception while CSR abstract reads work (T-Head E902).
+            Err(RiscvError::AbstractCommand(AbstractCommandErrorKind::Exception))
+                if (0x1000..0x1020).contains(&address) =>
+            {
+                tracing::debug!(
+                    "Abstract read of GPR {:#x} rejected, falling back to progbuf",
+                    address
+                );
+                self.read_gpr_progbuf(address)
+            }
             other => other,
         }
     }
@@ -1573,11 +1584,43 @@ impl<'state> RiscvCommunicationInterface<'state> {
     fn read_register_xlen(&mut self, regno: impl Into<RegisterId>) -> Result<u64, RiscvError> {
         let regno = regno.into();
 
-        if self.state.xlen_64 {
+        let result = if self.state.xlen_64 {
             self.abstract_cmd_register_read_64(regno)
         } else {
             self.abstract_cmd_register_read(regno).map(u64::from)
+        };
+
+        match result {
+            // Workaround for cores whose debug module rejects abstract-command
+            // reads of GPRs (regno 0x1000..0x1020) with cmderr=Exception while
+            // CSR abstract reads work fine (observed on T-Head E902).
+            Err(RiscvError::AbstractCommand(AbstractCommandErrorKind::Exception))
+                if (0x1000..0x1020).contains(&regno.0) =>
+            {
+                tracing::debug!(
+                    "Abstract read of GPR {:#x} rejected, falling back to progbuf",
+                    regno.0
+                );
+                self.read_gpr_progbuf(regno.0 as u16)
+            }
+            other => other,
         }
+    }
+
+    /// Read a GPR via program buffer + `mscratch` bounce.
+    ///
+    /// Copies the GPR into `mscratch` (0x340) with a program-buffer `csrw`, then
+    /// reads `mscratch` back through the abstract CSR path, which works on cores
+    /// where direct GPR abstract reads are rejected (see [`Self::read_register_xlen`]).
+    fn read_gpr_progbuf(&mut self, regno: u16) -> Result<u64, RiscvError> {
+        const MSCRATCH: u16 = 0x340;
+        self.halted_access(|core| {
+            let csrw_cmd = assembly::csrw(MSCRATCH, (regno & 0x1f) as u8);
+            core.schedule_setup_program_buffer(&[csrw_cmd])?;
+            let postexec_cmd = core.postexec_command();
+            core.execute_abstract_command(postexec_cmd.0)?;
+            core.abstract_cmd_csr_read(MSCRATCH).map(u64::from)
+        })
     }
 
     /// Write a register with an abstract command of the target's XLEN width.

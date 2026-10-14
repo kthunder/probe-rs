@@ -6,7 +6,7 @@ use probe_rs_target::ScanChainElement;
 
 use super::{JtagBatch, JtagChainAccess, TapState};
 use crate::probe::common::{
-    bit_sequence_to_bitvec, common_sequence, extract_idcodes, extract_ir_lengths,
+    bit_sequence_to_bitvec, common_sequence, extract_idcodes, extract_ir_lengths, IdCode,
 };
 use crate::probe::queue::{BatchExecutionError, ErasedBatch};
 use crate::probe::{
@@ -143,7 +143,7 @@ impl<'p> JtagChain<'p> {
             return Ok(&state.scan_chain);
         }
 
-        const MAX_CHAIN: usize = 8;
+        const MAX_CHAIN: usize = 1;
 
         self.tap_reset_run()?;
 
@@ -166,6 +166,12 @@ impl<'p> JtagChain<'p> {
             idcodes.len(),
             idcodes
         );
+        // The C-SKY TAP locks up when shifting more bits into the IR than its
+        // width, so skip the IR probing and hardcode its IR length instead.
+        if idcodes == [Some(IdCode(0x1000_0B6F))] {
+            tracing::debug!("Known C-SKY TAP, using IR length 5");
+            return Ok(self.store_scan_chain(idcodes, vec![5]));
+        }
 
         tracing::debug!("Scanning JTAG chain for IR lengths");
 
@@ -232,6 +238,33 @@ impl<'p> JtagChain<'p> {
 
         let state = (*self.probe).chain_state_ref();
         Ok(&state.scan_chain)
+    }
+
+    /// Store the measured chain in the probe state and return it.
+    fn store_scan_chain(
+        &mut self,
+        idcodes: Vec<Option<IdCode>>,
+        ir_lens: Vec<usize>,
+    ) -> &[ScanChainElement] {
+        tracing::info!("Found {} TAPs on reset scan", idcodes.len());
+        tracing::debug!("Detected IR lens: {:?}", ir_lens);
+
+        let state = self.probe.chain_state();
+        state.scan_chain = idcodes
+            .iter()
+            .zip(ir_lens)
+            .map(|(idcode, irlen)| ScanChainElement {
+                ir_len: Some(irlen as u8),
+                name: idcode.map(|i| i.to_string()),
+            })
+            .collect();
+        state.idcodes = idcodes
+            .into_iter()
+            .map(|idcode| idcode.map(u32::from))
+            .collect();
+
+        let state = (*self.probe).chain_state_ref();
+        &state.scan_chain
     }
 
     /// Return the IDCODEs that the scan found, with one entry for each TAP of [`Self::chain`].

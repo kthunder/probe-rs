@@ -37,6 +37,7 @@ use commands::{
     general::{
         connect::{ConnectRequest, ConnectResponse},
         disconnect::{DisconnectRequest, DisconnectResponse},
+        enable_cjtag::EnableCJtagRequest,
         host_status::{HostStatusRequest, HostStatusResponse},
         info::Capabilities,
         reset::{ResetRequest, ResetResponse},
@@ -719,6 +720,20 @@ impl CmsisDap {
         // Store the actually used protocol, to handle cases where the default protocol is used.
         tracing::info!("Using protocol {}", used_protocol);
         self.protocol = Some(used_protocol);
+
+        // Vendor-specific: switch to cJTAG when operating under JTAG. This has
+        // to come after DAP_Connect: the probe firmware emits the cJTAG (oJTAG
+        // mode) entry sequences through the JTAG pin output path, which only
+        // drives the wire once connect has configured the port IO. Probes
+        // whose firmware does not implement the command answer 0xFF, which is
+        // tolerated.
+        if matches!(self.protocol, Some(WireProtocol::Jtag)) {
+            commands::ignore_unknown_command(commands::send_command_once(
+                &mut self.device,
+                &EnableCJtagRequest,
+            ))?;
+            tracing::debug!("Enabled cJTAG mode");
+        }
 
         // If operating under JTAG, try to bring the JTAG machinery out of reset. Ignore errors
         // since not all probes support this.

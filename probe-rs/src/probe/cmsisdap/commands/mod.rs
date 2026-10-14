@@ -567,6 +567,10 @@ pub enum CommandId {
     UartControl = 0x22,
     UartStatus = 0x23,
     UartTransfer = 0x21,
+    // Vendor-specific commands, not part of the CMSIS-DAP spec.
+    // Adjust these IDs to match the target probe firmware.
+    SetVref = 0x9D,
+    EnableCJtag = 0x9F,
 }
 
 pub(crate) trait Request {

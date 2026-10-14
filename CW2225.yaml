@@ -1,0 +1,63 @@
+# CW2225: T-Head E902 (RV32EMC) based MCU
+# JEP106 0x37/0xb = C-SKY Microsystems (T-Head)
+name: CW2225 Series
+manufacturer:
+  id: 0x37
+  cc: 0xb
+
+variants:
+- name: CW2225
+  cores:
+  - name: main
+    type: riscv
+    core_access_options: !Riscv
+      # hart_id / jtag_tap 可选; 单核单TAP时默认即可
+  memory_map:
+  # Flash A: 主程序区
+  - !Nvm
+    range:
+      start: 0x01040000
+      end: 0x01048000
+    cores:
+    - main
+    access:
+      boot: true
+  # RAM
+  - !Ram
+    range:
+      start: 0x02000000
+      end: 0x02001000
+    cores:
+    - main
+  # 调试链固定配置: 单 TAP, IR=5 (超长IR移位会打乱cJTAG转换器, 必须跳过探测)
+  jtag:
+    force_scan_chain: true
+    scan_chain:
+    - ir_len: 5
+  # variant 级算法引用: 本 variant 使用哪些顶层 flash_algorithms (必须有, 否则匹配不到算法)
+  flash_algorithms:
+  - cw2225-flash
+
+# 烧录算法: 两块flash共用同一个算法实体, instructions / pc_* 待填
+# [必填]  = YAML 解析或运行时缺了直接报错
+# [可选]  = 不填走默认/跳过逻辑
+flash_algorithms:
+- name: cw2225-flash                        # [必填]
+  description: CW2225 internal flash        # [必填]
+  instructions: cREGwDEogkABRREBgoABRYKAsocuhr6FBaCTBQAgaaBxEQbA6SiRLkFFAS5BRRUigkABRREBgoA39/3+EwGB/BMHB6Am1gbaItgqwC7CKpeTBvAfsoRj9uYAAUSJ7AFFKaCFJH35EwVg89JQQlSyVBMBgQOCgBMGAAImh2NzlgAyh5JHOoZoALOFhwA6xEkoIkeCR2wAE3b3DzOFhwD5ICJHmYw6lF2/Y0SwAAFFgoBRESLCE+QFICWAQgQmwAbEqoRBgLf3/f6ThwfgppcTB/BfY3D3An0UQgQmhUGAsSKThAQgZfABRaJAEkSCRDEBgoAmhYUiZfETBUDz9be3BwADk4cHQJhLcREGwHmbmMuYQ3mbmMORJIJAAUURAYKAgUdjE/YAgoAzh/UAg0YHADMH9QCFByMA1wDlt7cXgOAKBT6Vg0cVAJP35w+jAPUAgoBBR7cHAANjFuUA+FN5m/jTgoD4UxNnFwDdvxMBwf0izibMkwcAAgbQqoSughN3NQAT9PcPY+THABN09g8BQ4FGY+WGBJPWJACTlwYBtwUEATO2tADBg5P29n9j5bQAxgeT1hcBkwf0/0IG4gfRj3oH2Y/VjzcHAANcy1UqglByROJEAUUTAUECgoACyrMH1EARRmNT9gCyhxP29w+zhdIASAg6yBrGPsQ2whbADTeSRqJHMkM3BgADtpcTBgYCk/b3D5MXIwCyl1JGBQNCR4JCkMMTc/MPrbdxEQbANwcEAbcHAwBjZOUAtwcCAD4FRYFdjbcHAAPIyx0qgkABRREBgoA39/3+EwcHoCqXkwbwH6qHY/fmBDf3/f4TBwfgKpdj9OYEN/f9/hMHB8AqlwFFY+/mAjcHAP9xEZOGByAT9gf8UF6ThwcEMsACRuOZ9v63BwADqFsRAXmNEzUVAIKAQWcTBwfwyb83B/8A8beCgDf3/f4TBwegKpeTBvAfURGqh2Pm5gITdwX8WF86wAJHIUe3BgADmYO0Wp2LupcFRTMV9QB1jRM1FQAxAYKAN/f9/hMHB+Aql2Pp5gATdwX8WF86whJHQUfptzf3/f4TBwfAKpcBRePq5vwT9wf8WF86xCJHYUd1t6FHYxf1ALcnAAMjoAcCgoDBR2MW9QC3JwADBUeY04KAtycAAwlHmMNJReG7cyUAMHNwBDCCgCGJGcFzYAQwgoBzcAQwgoBhESLABsLFNzcEAAOTB8AKfNhcTJPnFwBczCMqBAbJPzxYhYv1/5JAAkQBRSEBgoA=
+  pc_init: 0x0                              # [可选] 为 None 时跳过 Init
+  pc_uninit: 0xe                            # [可选] 为 None 时跳过 UnInit
+  pc_program_page: 0x12                      # [必填] 编程入口偏移
+  pc_erase_sector: 0x1a                      # [必填] 扇区擦除入口偏移
+  data_section_offset: 0x3b0                  # [必填] 数据段在镜像内的偏移
+  flash_properties:                         # [必填] 整个块无默认值, 子字段全必填
+    address_range:                          # [必填] 算法覆盖的 flash 地址范围
+      start: 0x01040000
+      end: 0x01048000
+    page_size: 0x200                        # [必填] 编程页大小
+    erased_byte_value: 0xff                 # [必填] 擦除后字节值
+    program_page_timeout: 100               # [必填] 编程一页超时(ms)
+    erase_sector_timeout: 3000              # [必填] 擦除一扇区超时(ms)
+    sectors:                                # [语法可选但实际必须] iter_sectors 断言非空且首项 address=0
+    - size: 0x200
+      address: 0x0
