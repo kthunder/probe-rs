@@ -123,10 +123,8 @@ impl<'probe> JtagDtm<'probe> {
             )));
         }
 
-        let ir_len = self.probe.params().irlen;
         let mut batch = JtagBatch::new();
-        let ir = BitSequence::from_bytes(&address.to_le_bytes(), ir_len);
-        self.probe.shift_ir(&mut batch, &ir);
+        self.probe.select_ir(&mut batch, address);
         let handle = self.probe.exchange_dr(&mut batch, &dr);
         self.probe.run_test_idle(&mut batch, idle_cycles);
         let mut results = self.probe.run(batch)?;

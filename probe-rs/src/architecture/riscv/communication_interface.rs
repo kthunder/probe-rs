@@ -2556,49 +2556,77 @@ impl<'state> RiscvCommunicationInterface<'state> {
 
         self.autoexec_prime_write_pipeline(address, data[0].into())?;
 
-        // A write of DATA0 that arrives while the debug module is busy makes a `Busy` error
-        // and it does not store the word. The status of the command therefore gets a test
-        // after each group of words, and the group that lost a word runs again.
+        // The pipeline is executed by the hardware: with `abstractauto`
+        // enabled, each DATA0 write triggers the transfer command. The whole
+        // chunk can therefore be streamed back to back and only checked after
+        // the fact. A DATA0 write that arrives while the module is busy may be
+        // dropped with or without a `Busy` error, but S0 always shows how many
+        // words actually landed, so progress is verified and lost words are
+        // re-sent.
         let chunk_size: usize = 256;
         let mut index = 1;
 
         while index < data.len() {
             let chunk_end = core::cmp::min(index + chunk_size, data.len());
 
+            // A previous S0 read may have replaced the program buffer with the
+            // mscratch fallback program, so restore the store loop first. The
+            // two scheduled progbuf writes ride along with the chunk's first
+            // flush, so this costs no extra round trip.
+            self.schedule_setup_program_buffer(&[
+                assembly::sw(0, 8, V::WIDTH as u32, 9),
+                assembly::addi(8, 8, V::WIDTH.byte_width() as i16),
+            ])?;
+
             for value in &data[index..chunk_end] {
                 self.schedule_write_dm_register(Data0((*value).into()))?;
-                self.wait_for_progbuf()?;
             }
 
-            match self.wait_for_abstract_idle(PROGBUF_TIMEOUT) {
-                Ok(()) => index = chunk_end,
+            let busy = match self.wait_for_abstract_idle(PROGBUF_TIMEOUT) {
+                Ok(()) => false,
                 Err(RiscvError::AbstractCommand(AbstractCommandErrorKind::Busy)) => {
                     self.clear_abstract_command_error()?;
-                    self.write_dm_register(Abstractauto(0))?;
-
-                    // S0 shows the number of words that the target stored.
-                    let current_addr = self.read_register_xlen(registers::S0)?;
-                    let written = ((current_addr - address) / width) as usize;
-
-                    tracing::warn!(
-                        "Autoexec Busy during chunk [{}, {}). S0={:#x}, written={}",
-                        index,
-                        chunk_end,
-                        current_addr,
-                        written,
-                    );
-
-                    if written == 0 || written >= data.len() {
-                        return Err(RiscvError::AbstractCommand(AbstractCommandErrorKind::Busy));
-                    }
-
-                    self.autoexec_prime_write_pipeline(
-                        address + written as u64 * width,
-                        data[written].into(),
-                    )?;
-                    index = written + 1;
+                    true
                 }
                 Err(e) => return Err(e),
+            };
+
+            // S0 shows the number of words that the target stored.
+            let current_addr = self.read_register_xlen(registers::S0)?;
+            let written = ((current_addr - address) / width) as usize;
+
+            if written < chunk_end {
+                tracing::warn!(
+                    "Autoexec memory write: chunk [{}, {}){} stored only {} words (S0={:#x})",
+                    index,
+                    chunk_end,
+                    if busy { ", Busy" } else { "" },
+                    written,
+                    current_addr
+                );
+
+                if written == 0 || written >= data.len() {
+                    return Err(RiscvError::AbstractCommand(AbstractCommandErrorKind::Busy));
+                }
+
+                // Pause autoexec while repairing the pipeline.
+                self.write_dm_register(Abstractauto(0))?;
+
+                // Restore the store loop (the S0 read clobbered it), then
+                // re-send the word after the last one that landed. The prime
+                // function flushes, so the progbuf writes land first.
+                self.schedule_setup_program_buffer(&[
+                    assembly::sw(0, 8, V::WIDTH as u32, 9),
+                    assembly::addi(8, 8, V::WIDTH.byte_width() as i16),
+                ])?;
+                self.autoexec_prime_write_pipeline(
+                    address + written as u64 * width,
+                    data[written].into(),
+                )?;
+
+                index = written + 1;
+            } else {
+                index = chunk_end;
             }
         }
 

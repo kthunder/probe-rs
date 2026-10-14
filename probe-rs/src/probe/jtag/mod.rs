@@ -53,6 +53,13 @@ pub struct JtagChainState {
 
     /// The parameters of the scan chain.
     pub chain_params: ChainParams,
+
+    /// The padded IR bit sequence currently loaded into the chain, if known.
+    ///
+    /// Used to skip redundant IR shifts when a command requests the
+    /// instruction that is already loaded. Reset by TAP resets and by any
+    /// direct IR manipulation that bypasses [`JtagChain::shift_ir`].
+    pub current_ir: Option<BitSequence>,
 }
 
 impl Default for JtagChainState {
@@ -63,6 +70,7 @@ impl Default for JtagChainState {
             scan_chain: Vec::new(),
             idcodes: Vec::new(),
             chain_params: ChainParams::default(),
+            current_ir: None,
         }
     }
 }

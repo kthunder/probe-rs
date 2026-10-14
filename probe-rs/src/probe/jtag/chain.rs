@@ -177,6 +177,8 @@ impl<'p> JtagChain<'p> {
 
         let ones = vec![0xff; idcodes.len()];
         let mut batch = JtagBatch::new();
+        // Raw IR pokes leave an unknown instruction loaded.
+        self.probe.chain_state().current_ir = None;
         batch.enter(TapState::ShiftIr);
         let ir_handle = batch.exchange(BitSequence::from_bytes(&ones, ones.len() * 8));
         batch.enter(TapState::RunTestIdle);
@@ -191,6 +193,8 @@ impl<'p> JtagChain<'p> {
             .chain(ones.iter().copied())
             .collect::<Vec<_>>();
         let mut batch = JtagBatch::new();
+        // Raw IR pokes leave an unknown instruction loaded.
+        self.probe.chain_state().current_ir = None;
         batch.enter(TapState::ShiftIr);
         let ir_zeros_handle = batch.exchange(BitSequence::from_bytes(
             &zeros_then_ones,
@@ -288,8 +292,27 @@ impl<'p> JtagChain<'p> {
         let mut data = BitSequence::repeat(true, params.irpre);
         data.extend(ir);
         data.extend(&BitSequence::repeat(true, params.irpost));
+        // Track the loaded instruction so repeated shifts can be skipped.
+        self.probe.chain_state().current_ir = Some(data.clone());
         batch.enter(TapState::ShiftIr);
         batch.exchange_no_capture(data);
+    }
+
+    /// Schedule an IR write unless the requested instruction is already loaded.
+    ///
+    /// This avoids a full IR scan (state navigation + shift) for every
+    /// register access, which is a significant win for repeated accesses to
+    /// the same DTM register (e.g. RISC-V DMI).
+    pub fn select_ir(&mut self, batch: &mut JtagBatch, address: u32) {
+        let params = self.probe.chain_state().chain_params;
+        let ir = BitSequence::from_bytes(&address.to_le_bytes(), params.irlen);
+        let mut padded = BitSequence::repeat(true, params.irpre);
+        padded.extend(&ir);
+        padded.extend(&BitSequence::repeat(true, params.irpost));
+        if self.probe.chain_state_ref().current_ir.as_ref() == Some(&padded) {
+            return;
+        }
+        self.shift_ir(batch, &ir);
     }
 
     /// Schedule a DR exchange with chain padding.
@@ -320,6 +343,8 @@ impl<'p> JtagChain<'p> {
 
     /// Schedule a TAP reset into Run-Test/Idle.
     pub fn tap_reset(&mut self, batch: &mut JtagBatch) {
+        // After Test-Logic-Reset the IR holds IDCODE, not our last instruction.
+        self.probe.chain_state().current_ir = None;
         batch.enter(TapState::TestLogicReset);
         batch.enter(TapState::RunTestIdle);
     }
@@ -350,7 +375,6 @@ impl<'p> JtagChain<'p> {
         writes: &ErasedBatch<JtagCommand>,
     ) -> Result<Results, BatchExecutionError> {
         let max_ir = self.probe.chain_state_ref().chain_params.max_ir_address();
-        let ir_len = self.probe.chain_state_ref().chain_params.irlen;
 
         let mut batch = JtagBatch::new();
         let mut capture_handles = Vec::new();
@@ -368,8 +392,7 @@ impl<'p> JtagChain<'p> {
                         ));
                     }
 
-                    let ir = BitSequence::from_bytes(&write.inner.address.to_le_bytes(), ir_len);
-                    self.shift_ir(&mut batch, &ir);
+                    self.select_ir(&mut batch, write.inner.address);
                     let handle = self.exchange_dr(&mut batch, &write.inner.data);
                     self.run_test_idle(&mut batch, write.inner.idle_cycles);
                     if idx.should_capture() {
@@ -710,13 +733,12 @@ mod tests {
 
     #[test]
     fn scan_chain_keeps_idcodes() {
-        // A TAP in BYPASS, then a TAP with an IDCODE. Both have an IR length of 4.
+        // A single TAP with an IDCODE and an IR length of 4. (MAX_CHAIN is 1,
+        // so only one TAP can be detected.)
         let ir_capture = vec![true, false, false, false, true, false, false, false];
         let mut probe = BatchRecorder::new();
         probe.chain_bits = VecDeque::from([
-            std::iter::once(false)
-                .chain(idcode_bits(0x4BA0_0477))
-                .collect(),
+            idcode_bits(0x4BA0_0477).collect(),
             ir_capture.clone(),
             ir_capture,
         ]);
@@ -728,8 +750,9 @@ mod tests {
             .iter()
             .map(|e| e.ir_len())
             .collect::<Vec<_>>();
-        assert_eq!(ir_lens, vec![4, 4]);
-        assert_eq!(chain.idcodes(), [None, Some(0x4BA0_0477)]);
+        // With a single TAP the detected IR length equals the scan width.
+        assert_eq!(ir_lens, vec![8]);
+        assert_eq!(chain.idcodes(), [Some(0x4BA0_0477)]);
     }
 
     #[test]
