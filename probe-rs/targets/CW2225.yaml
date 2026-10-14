@@ -13,6 +13,13 @@ variants:
     core_access_options: !Riscv
       # hart_id / jtag_tap 可选; 单核单TAP时默认即可
   memory_map:
+  # Flash B: 数据区
+  - !Nvm
+    range:
+      start: 0x01020000
+      end: 0x01021600
+    cores:
+    - main
   # Flash A: 主程序区
   - !Nvm
     range:
@@ -52,7 +59,7 @@ flash_algorithms:
   data_section_offset: 0x3b0                  # [必填] 数据段在镜像内的偏移
   flash_properties:                         # [必填] 整个块无默认值, 子字段全必填
     address_range:                          # [必填] 算法覆盖的 flash 地址范围
-      start: 0x01040000
+      start: 0x01020000
       end: 0x01048000
     page_size: 0x200                        # [必填] 编程页大小
     erased_byte_value: 0xff                 # [必填] 擦除后字节值
